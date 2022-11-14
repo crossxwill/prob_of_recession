@@ -14,7 +14,7 @@ knitr::opts_chunk$set(warning = FALSE)
 
 ## Summary
 
-Forecast the probability of a recession in the next 3 months using the following predictors:
+Forecast the probability of a recession in the next 6 months using the following predictors:
 
 1.  Spread between 10Y CMT and Effective Federal Funds Rate
 2.  YOY change in Unemployment Rate
@@ -72,9 +72,14 @@ full_data_wide <- full_data_wide_features %>%
   mutate(USREC_LEAD1 = lead(USREC, 1),
          USREC_LEAD2 = lead(USREC, 2),
          USREC_LEAD3 = lead(USREC, 3),
-         USREC_3MOS = pmax(USREC_LEAD1, USREC_LEAD2, USREC_LEAD3)) %>% 
+         USREC_LEAD4 = lead(USREC, 4),
+         USREC_LEAD5 = lead(USREC, 5),
+         USREC_LEAD6 = lead(USREC, 6),
+         FUTREC = pmax(USREC_LEAD1, USREC_LEAD2, USREC_LEAD3,
+                                 USREC_LEAD4, USREC_LEAD5, USREC_LEAD6)) %>% 
   drop_na() %>% 
-  select(-USREC, -USREC_LEAD1, -USREC_LEAD2, -USREC_LEAD3) 
+  select(-USREC, -USREC_LEAD1, -USREC_LEAD2, -USREC_LEAD3,
+         -USREC_LEAD4, -USREC_LEAD5, -USREC_LEAD6) 
 ```
 
 
@@ -84,7 +89,7 @@ full_data_wide <- full_data_wide_features %>%
 ```{r}
 set.seed(111)
 
-train_id <- sample.split(full_data_wide$USREC_3MOS, SplitRatio = 0.80)
+train_id <- sample.split(full_data_wide$FUTREC, SplitRatio = 0.80)
 
 train_data <- full_data_wide[train_id,]
 test_data <- full_data_wide[!train_id,]
@@ -95,7 +100,7 @@ summary(train_data)
 ## Logistic Regression
 
 ```{r}
-logit_mod <- glm(USREC_3MOS ~ SPRD_10YCMT_FEDFUNDS +
+logit_mod <- glm(FUTREC ~ SPRD_10YCMT_FEDFUNDS +
                    D_UNRATE + 
                    G_CPIU, data=train_data, family=binomial)
 
@@ -118,7 +123,7 @@ plot(predictorEffects(logit_mod, focal.levels=1000),
 ## Logit with Knots
 
 ```{r}
-logit_mod_knot <- glm(USREC_3MOS ~ SPRD_10YCMT_FEDFUNDS + 
+logit_mod_knot <- glm(FUTREC ~ SPRD_10YCMT_FEDFUNDS + 
                         pmax(0,SPRD_10YCMT_FEDFUNDS) +
                         D_UNRATE +
                         pmax(0, D_UNRATE) +
@@ -146,7 +151,7 @@ plot(predictorEffects(logit_mod_knot, focal.levels=1000),
 ## Shape-Constrained GAM
 
 ```{r}
-scam_mod <- scam(USREC_3MOS ~ s(SPRD_10YCMT_FEDFUNDS, bs="mpd") +
+scam_mod <- scam(FUTREC ~ s(SPRD_10YCMT_FEDFUNDS, bs="mpd") +
                    D_UNRATE  +
                    G_CPIU,
                  data=train_data, family=binomial())
@@ -163,7 +168,7 @@ plot(scam_mod,pages=1,se=FALSE)
 ## Null Model
 
 ```{r}
-null_mod <- glm(USREC_3MOS ~ 1, data=train_data, family=binomial)
+null_mod <- glm(FUTREC ~ 1, data=train_data, family=binomial)
 
 summary(null_mod)
 ```
@@ -179,7 +184,7 @@ scam_preds <- predict(scam_mod, newdata=test_data, type="response")
 
 perf <- function(lst_preds, f_metric=caTools::colAUC, metricname="ROC-AUC"){
   map_dfr(lst_preds, function(x){
-  f_metric(x, test_data$USREC_3MOS)
+  f_metric(x, test_data$FUTREC)
 }) %>% 
   pivot_longer(everything(), names_to="model", values_to=metricname) %>% 
   knitr::kable()
@@ -221,4 +226,4 @@ output$prob_rec <- scales::percent(output$prob_rec)
 knitr::kable(output)
 
 ```
-Relative to the historical baseline, the probability of a recession in the next 3 months is low or close to the historical risk of a recession.
+Relative to the historical baseline, the probability of a recession in the next 6 months is low or close to the historical risk of a recession.
