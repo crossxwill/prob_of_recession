@@ -64,7 +64,7 @@ full_data_wide_features <- full_data_wide_raw %>%
          ) 
 ```
 
-## Recession in next 3 months
+## Recession in next 6 months
 
 ```{r}
 full_data_wide <- full_data_wide_features %>% 
@@ -197,7 +197,7 @@ perf(myPreds, caTools::colAUC, "ROC-AUC")
 perf(myPreds, MLmetrics::LogLoss, "LogLoss")
 ```
 
-## Probability of Recession (10/01/2022)
+## Probability of Recession (Most Recent Month)
 
 ```{r}
 
@@ -215,15 +215,45 @@ mods <- list(logistic_reg=logit_mod,
                               knot_mod=logit_mod_knot,
                               baseline=null_mod)
 
-output <- map_dfc(mods, function(x){
-  predict(x, newdata=curr_data, type="response")
-}) %>% 
-  pivot_longer(everything(), names_to = "model",
-               values_to = "prob_rec")
+score_fun <- function(mods, dat) {
+  output <- map_dfc(.x = mods, .f = function(x) {
+    predict(x, newdata = dat, type = "response")
+  }) %>%
+    pivot_longer(everything(), names_to = "model",
+                 values_to = "prob_rec")
+  
+  output$prob_rec <- scales::percent(output$prob_rec)
+  
+  return(output)
+}
 
-output$prob_rec <- scales::percent(output$prob_rec)
 
-knitr::kable(output)
+knitr::kable(score_fun(mods, curr_data))
+```
+
+## Probability of Recession (What-if)
+
+What if:
+
+1. Inversion between 10Y CMT and federal funds rate of 2 bps
+2. Unemployment Rate increases to 3.9%, which is still 0.3% below Nov 2021's unemployment rate
+3. Inflation hits 7.30%
+
+```{r}
+curr_data_what_if <- curr_data
+
+curr_data_what_if$SPRD_10YCMT_FEDFUNDS <- -0.02
+curr_data_what_if$D_UNRATE <- -0.3
+curr_data_what_if$G_CPIU <- 7.30
+curr_data_what_if$UNRATE <- 3.9
+curr_data_what_if$date <- "2022-11-01"
+
+knitr::kable(curr_data_what_if)
+```
+
+```{r}
+knitr::kable(score_fun(mods, curr_data_what_if))
 
 ```
-Relative to the historical baseline, the probability of a recession in the next 6 months is low or close to the historical risk of a recession.
+
+
