@@ -8,7 +8,7 @@ output: pdf_document
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 knitr::opts_chunk$set(message = FALSE)
-knitr::opts_chunk$set(warning = TRUE)
+knitr::opts_chunk$set(warning = FALSE)
 
 ```
 
@@ -17,6 +17,8 @@ knitr::opts_chunk$set(warning = TRUE)
 Forecast the probability of a recession in the next 3 months using the following predictors:
 
 1.  Spread between 10Y CMT and Effective Federal Funds Rate
+2.  YOY change in Unemployment Rate
+3.  YOY growth in CPI-U
 
 ## Extract Historical Data
 
@@ -32,7 +34,7 @@ library(effects)
 library(car)
 library(MLmetrics)
 
-series_id <- c("FEDFUNDS", "GS10", "USREC")
+series_id <- c("FEDFUNDS", "GS10", "USREC", "UNRATE", "CPIAUCSL")
 
 full_data <- map_dfr(series_id, function(x) {
   fredr(
@@ -46,35 +48,41 @@ full_data <- map_dfr(series_id, function(x) {
 ## Pivot Wider
 
 ```{r}
-full_data_wide <- full_data %>% 
+full_data_wide_raw <- full_data %>% 
+  arrange(date) %>% 
   select(date, series_id, value) %>% 
   pivot_wider(id_cols=date, names_from = series_id, values_from = value)
-```
-
-## Recession in next 3 months
-
-```{r}
-full_data_wide <- full_data_wide %>% 
-  arrange(date) %>% 
-  mutate(USREC_LEAD1 = lead(USREC, 1),
-         USREC_LEAD2 = lead(USREC, 2),
-         USREC_LEAD3 = lead(USREC, 3),
-         USREC_3MOS = pmax(USREC_LEAD1, USREC_LEAD2, USREC_LEAD3)) %>% 
-  drop_na()
 ```
 
 ## Calculate Features/Predictors
 
 ```{r}
-full_data_wide <- full_data_wide %>% 
-  mutate(SPRD_10YCMT_FEDFUNDS = GS10 - FEDFUNDS) %>% 
-  select(-USREC, -USREC_LEAD1, -USREC_LEAD2, -USREC_LEAD3)
+full_data_wide_features <- full_data_wide_raw %>% 
+  mutate(SPRD_10YCMT_FEDFUNDS = GS10 - FEDFUNDS,
+         D_UNRATE = UNRATE - lag(UNRATE, 12),
+         G_CPIU = (CPIAUCSL / lag(CPIAUCSL, 12) - 1) * 100
+         ) 
 ```
+
+## Recession in next 3 months
+
+```{r}
+full_data_wide <- full_data_wide_features %>% 
+  arrange(date) %>% 
+  mutate(USREC_LEAD1 = lead(USREC, 1),
+         USREC_LEAD2 = lead(USREC, 2),
+         USREC_LEAD3 = lead(USREC, 3),
+         USREC_3MOS = pmax(USREC_LEAD1, USREC_LEAD2, USREC_LEAD3)) %>% 
+  drop_na() %>% 
+  select(-USREC, -USREC_LEAD1, -USREC_LEAD2, -USREC_LEAD3) 
+```
+
+
 
 ## Split Train/Test
 
 ```{r}
-set.seed(1)
+set.seed(111)
 
 train_id <- sample.split(full_data_wide$USREC_3MOS, SplitRatio = 0.80)
 
@@ -87,55 +95,70 @@ summary(train_data)
 ## Logistic Regression
 
 ```{r}
-logit_mod <- glm(USREC_3MOS ~ SPRD_10YCMT_FEDFUNDS, data=train_data, family=binomial)
+logit_mod <- glm(USREC_3MOS ~ SPRD_10YCMT_FEDFUNDS +
+                   D_UNRATE + 
+                   G_CPIU, data=train_data, family=binomial)
 
 summary(logit_mod)
 ```
 
-## Logit with Knot
+## Effect Plot for Logistic Regression
+
+```{r}
+plot(predictorEffects(logit_mod, focal.levels=1000),
+     main=NULL,
+     axes = list(
+       grid = TRUE,
+       x = list(rug = FALSE),
+       y = list(type = "response")
+     ))
+```
+
+
+## Logit with Knots
 
 ```{r}
 logit_mod_knot <- glm(USREC_3MOS ~ SPRD_10YCMT_FEDFUNDS + 
-                        pmax(0,SPRD_10YCMT_FEDFUNDS),
+                        pmax(0,SPRD_10YCMT_FEDFUNDS) +
+                        D_UNRATE +
+                        pmax(0, D_UNRATE) +
+                        G_CPIU +
+                        pmax(0, G_CPIU),
                       data=train_data, family=binomial)
 
 summary(logit_mod_knot)
 ```
 
 
+## Effect Plot for Knots
+
+```{r}
+plot(predictorEffects(logit_mod_knot, focal.levels=1000),
+     main=NULL,
+     axes = list(
+       grid = TRUE,
+       x = list(rug = FALSE),
+       y = list(type = "response")
+     ))
+```
+
+
 ## Shape-Constrained GAM
 
 ```{r}
-scam_mod <- scam(USREC_3MOS ~ s(SPRD_10YCMT_FEDFUNDS, bs="mpd"),
+scam_mod <- scam(USREC_3MOS ~ s(SPRD_10YCMT_FEDFUNDS, bs="mpd") +
+                   D_UNRATE  +
+                   G_CPIU,
                  data=train_data, family=binomial())
 
 summary(scam_mod)
 
-plot(scam_mod,pages=1,shade=TRUE)
+plot(scam_mod,pages=1,se=FALSE)
 
 ```
 
-## Effect Plot
 
-```{r}
-plot(predictorEffects(logit_mod),
-     axes = list(
-       grid = TRUE,
-       x = list(rug = FALSE),
-       y = list(type = "response")
-     ))
-```
 
-## Effect Plot with knot
-
-```{r}
-plot(predictorEffects(logit_mod_knot),
-     axes = list(
-       grid = TRUE,
-       x = list(rug = FALSE),
-       y = list(type = "response")
-     ))
-```
 
 ## Null Model
 
@@ -145,12 +168,13 @@ null_mod <- glm(USREC_3MOS ~ 1, data=train_data, family=binomial)
 summary(null_mod)
 ```
 
-## Performance Metric
+## Performance Metrics
 
 ```{r}
 test_preds <- predict(logit_mod, newdata=test_data, type="response")
 null_preds <- predict(null_mod, newdata=test_data, type="response")
 knot_preds <- predict(logit_mod_knot, newdata=test_data, type="response")
+scam_preds <- predict(scam_mod, newdata=test_data, type="response")
 
 
 perf <- function(lst_preds, f_metric=caTools::colAUC, metricname="ROC-AUC"){
@@ -162,32 +186,39 @@ perf <- function(lst_preds, f_metric=caTools::colAUC, metricname="ROC-AUC"){
 }
 
 myPreds <- list(logit_reg=test_preds, null_model=null_preds,
-                knot_reg=knot_preds)
+                knot_reg=knot_preds, scam_mod = scam_preds)
 
 perf(myPreds, caTools::colAUC, "ROC-AUC")
 perf(myPreds, MLmetrics::LogLoss, "LogLoss")
 ```
 
-## Probability of Recession (11/11/2022)
-
-10Y CMT = 3.82 
-
-Eff. FFR = 3.84
+## Probability of Recession (10/01/2022)
 
 ```{r}
-curr_data = data.frame(SPRD_10YCMT_FEDFUNDS = 3.82 - 3.84)
+
+curr_data <- tail(full_data_wide_features, 1) %>% 
+  select(date, UNRATE, SPRD_10YCMT_FEDFUNDS, D_UNRATE, G_CPIU)
+
+knitr::kable(curr_data)
+```
+
+
+```{r}
 
 mods <- list(logistic_reg=logit_mod,
                               scam_mod=scam_mod,
                               knot_mod=logit_mod_knot,
                               baseline=null_mod)
 
-map_dfc(mods, function(x){
+output <- map_dfc(mods, function(x){
   predict(x, newdata=curr_data, type="response")
 }) %>% 
   pivot_longer(everything(), names_to = "model",
-               values_to = "prob_rec") %>% 
-  knitr::kable(.)
+               values_to = "prob_rec")
+
+output$prob_rec <- scales::percent(output$prob_rec)
+
+knitr::kable(output)
 
 ```
-Relative to the historical baseline, a slightly negative spread between the 10Y CMT and effective federal funds rate increases the chances of a recession in the next 3 months.
+Relative to the historical baseline, the probability of a recession in the next 3 months is low or close to the historical risk of a recession.
