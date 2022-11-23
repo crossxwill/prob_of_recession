@@ -29,9 +29,7 @@ Refer to this [vignette](https://cran.r-project.org/web/packages/fredr/vignettes
 ```{r}
 library(tidyverse)
 library(lubridate)
-library(scam)
 library(fredr)
-library(effects)
 library(car)
 library(MLmetrics)
 library(caret)
@@ -39,11 +37,13 @@ library(pdp)
 library(gridExtra)
 library(mboost)
 library(gbm)
-library(import)
 library(randomForest)
 library(glmnet)
 library(gtsummary)
 
+randSeed <- 1983
+
+startTestDate <- "1975-01-01"
 ```
 
 ```{r}
@@ -98,9 +98,9 @@ The adstock transformation is an auto-regressive transformation of a time series
 
 $$AdStock(x_t) = x_t + \theta AdStock(x_{t-1})$$
 
-where $0 < \theta < 1$.
+where $$0 < \theta < 1$$.
 
-The parameters cannot be estimated easily with least squares or logistic regression. Instead, we assume a range of potential values between 0.05 and 0.85.
+The parameters cannot be estimated easily with least squares or logistic regression. Instead, we assume a range of potential values between 0.05 and 1.
 
 ```{r}
 full_data_wide_features_adstock <- full_data_wide_features %>% 
@@ -121,16 +121,33 @@ full_data_wide_features_adstock <- full_data_wide_features %>%
                                      method="recursive"),
          adstkHH = ~stats::filter(.x,
                                      filter=0.85,
+                                     method="recursive"),
+         adstkHHH = ~stats::filter(.x,
+                                     filter=0.95,
+                                     method="recursive"),
+         cumsum = ~stats::filter(.x,
+                                     filter=1,
                                      method="recursive")
   ))) %>% 
   mutate(constant=1)
 ```
 
 
+## Remove the last 12 months of historical data
+
+Since the NBER often dates recessions after they have already occurred (and sometimes ended), remove the last 12 months of historical data from both the training and test data sets.
+
+```{r}
+recent_data <- tail(full_data_wide_features_adstock, 12)
+
+train_test <- head(full_data_wide_features_adstock, -12)
+```
+
+
 ## Recession in next 6 months
 
 ```{r}
-full_data_wide <- full_data_wide_features_adstock %>% 
+full_data_wide <- train_test %>% 
   arrange(date) %>% 
   mutate(USREC_LEAD1 = lead(USREC, 1),
          USREC_LEAD2 = lead(USREC, 2),
@@ -152,41 +169,14 @@ full_data_wide <- full_data_wide_features_adstock %>%
 ```{r}
 full_size <- nrow(full_data_wide)
 
-train_size <- floor(full_size*0.80)
+test_size <- floor(full_size*0.5)
 
-train_id <- seq.int(1,train_size,1)
+test_id <- seq.int(1,test_size,1)
 
 full_data_wide$constant <- 1
 
-train_data <- full_data_wide[train_id,]
-test_data <- full_data_wide[-train_id,]
-
-
-tbl_summary(train_data)
-```
-
-
-## Automated Approaches
-
-1. Gradient Boosting for Additive Models
-2. eXtreme Gradient Boosting Trees
-3. Random Forest
-4. Stepwise Regression
-5. Elastic Net (Lasso)
-6. Multivariate Adaptive Regression Splines
-7. Null Model: Intercept-only Model
-
-```{r}
-fitControl <- trainControl(method = "timeslice",
-                           initialWindow=392,
-                           horizon=120,
-                           fixedWindow=FALSE,
-                           skip=119,
-                           ## Estimate class probabilities
-                           classProbs = TRUE,
-                           ## Evaluate performance using 
-                           ## the following function
-                           summaryFunction = mnLogLoss)
+train_data <- full_data_wide[-test_id,]
+test_data <- full_data_wide[test_id,]
 
 train_yes_no <- train_data %>% 
   mutate(FUTREC = case_when(FUTREC == 1 ~ "yes",
@@ -195,16 +185,25 @@ train_yes_no <- train_data %>%
 train_yes_no$FUTREC <- factor(train_yes_no$FUTREC, 
                               levels=c("yes","no"))
 
-train_yes_no_relevel <- train_yes_no
 
-train_yes_no_relevel$FUTREC <- relevel(
-  train_yes_no_relevel$FUTREC, ref="no"
 
-)
+tbl_summary(train_data)
+```
 
+## Remove stale data from test set
+
+Exclude historical data prior to `r startTestDate` because the economy changed dramatically (due to computational innovation). 
+
+```{r}
+summary(test_data$date)
+
+test_data <- test_data %>% 
+  filter(date >= startTestDate)
 ```
 
 
+
+## Setup Parallel Processing
 
 ```{r}
 library(doParallel)
@@ -212,89 +211,216 @@ library(doParallel)
 cl <- makePSOCKcluster(5)
 registerDoParallel(cl)
 
-set.seed(111)
+```
+
+## Cross-Validation Framework
+
+```{r}
+folds <- 20
+fcstHorizon <- 12
+initWindow <- nrow(train_yes_no) - fcstHorizon * folds
+
+if(initWindow < 100){
+  stop("Too few observations.")
+}
+
+fitControl_oneSE <- trainControl(method = "timeslice",
+                           initialWindow=initWindow,
+                           horizon=fcstHorizon,
+                           fixedWindow=FALSE,
+                           skip=fcstHorizon-1,
+                           ## Estimate class probabilities
+                           classProbs = TRUE,
+                           ## Evaluate performance using 
+                           ## the following function
+                           summaryFunction = mnLogLoss,
+                           selectionFunction="oneSE")
+
+fitControl_best <- trainControl(method = "timeslice",
+                           initialWindow=initWindow,
+                           horizon=fcstHorizon,
+                           fixedWindow=FALSE,
+                           skip=fcstHorizon-1,
+                           ## Estimate class probabilities
+                           classProbs = TRUE,
+                           ## Evaluate performance using 
+                           ## the following function
+                           summaryFunction = mnLogLoss,
+                           selectionFunction="best")
+
+
+
+```
+
+
+## Gradient Boosting for Additive Models
+
+
+```{r}
+grid_gam <- expand.grid(mstop=seq(5,100,5),
+                        prune="no")
+
+set.seed(randSeed)
 
 gam_mod <- train(
   FUTREC ~ . - date - USREC - constant,
   data = train_yes_no,
   method = "gamboost",
-  trControl = fitControl,
+  trControl = fitControl_oneSE,
   metric = "logLoss",
-  tuneLength = 10,
+  tuneGrid = grid_gam,
   family = Binomial()
 )
+
+plot(gam_mod)
+
+gam_mod$bestTune
+```
+
+## eXtreme Gradient Boosting Trees
+
+```{r}
+grid_xgb <- expand.grid(nrounds=seq(1, 20, 2),
+                        max_depth=c(1,3,5),
+                        eta=seq(0.05,1,0.1),
+                        gamma=0,
+                        colsample_bytree=1,
+                        min_child_weight=10,
+                        subsample=1
+                        )
+
+set.seed(randSeed)
 
 xgb_mod <- train(
   FUTREC ~ . - date - USREC - constant,
   data = train_yes_no,
   method = "xgbTree",
-  trControl = fitControl,
+  trControl = fitControl_best,
   metric = "logLoss",
-  tuneLength = 10,
+  tuneGrid = grid_xgb,
   objective  = "binary:logistic"
 )
+
+plot(xgb_mod)
+
+xgb_mod$bestTune
+```
+
+
+## Random Forest
+
+```{r}
+grid_rf <- data.frame(mtry=seq.int(1,76,5))
+
+set.seed(randSeed)
 
 rf_mod <- train(
   FUTREC ~ . - date - USREC - constant,
   data = train_yes_no,
   method = "rf",
-  trControl = fitControl,
+  trControl = fitControl_oneSE,
   metric = "logLoss",
-  tuneLength = 10,
+  tuneGrid = grid_rf,
   importance = TRUE
 )
 
+plot(rf_mod)
+
+rf_mod$bestTune
+```
+
+## Stepwise Regression
+
+The `glmStepAIC` method uses the `glm()` function from the `stats` package. The documentation for `glm()` says:
+
+> For binomial and quasibinomial families the response can also be specified as a factor (when the first level denotes failure and all others success) or as a two-column matrix with the columns giving the numbers of successes and failures.
+
+However, for most methods (that do not invoke `glm()`) in `train`, the first level denotes the success (the opposite of `glm()`). This behavior causes the coefficient signs to flip. Be highly suspicious when interpreting coefficients from models that are fit using `train`.
+
+```{r}
+set.seed(randSeed)
+
 stepwise_mod <- train(
   FUTREC ~ . - date - USREC - constant,
-  data = train_yes_no_relevel,
+  data = train_yes_no,
   method = "glmStepAIC",
-  trControl = fitControl,
+  trControl = fitControl_best,
   metric = "logLoss",
   tuneLength = 10,
   family = binomial,
   trace = 0,
-  k = 5 * log(nrow(train_yes_no)),
+  k = 10*log(nrow(train_yes_no)),
   direction = "forward"
 )
+```
+
+
+## Elastic Net (Lasso)
+
+```{r}
+grid_glmnet <- expand.grid(
+  alpha = seq(0,1,0.1),
+  lambda = seq(0, 0.25, 0.01)
+)
+
+set.seed(randSeed)
 
 glmnet_mod <- train(
   FUTREC ~ . - date - USREC - constant,
   data = train_yes_no,
   method = "glmnet",
-  trControl = fitControl,
+  trControl = fitControl_best,
   metric = "logLoss",
-  tuneLength = 10,
+  tuneGrid = grid_glmnet,
   family = "binomial"
 )
+
+plot(glmnet_mod)
+
+glmnet_mod$bestTune
+```
+
+
+## Multivariate Adaptive Regression Splines
+
+```{r}
+grid_mars <- expand.grid(nprune=seq(1,10,1),
+                         degree=1)
+
+set.seed(randSeed)
 
 earth_mod <- train(
   FUTREC ~ . - date - USREC - constant,
   data = train_yes_no,
   method = "earth",
-  trControl = fitControl,
+  trControl = fitControl_best,
   metric = "logLoss",
-  tuneLength = 10,
+  tuneGrid = grid_mars,
   glm = list(family = binomial)
 )
+
+plot(earth_mod)
+
+earth_mod$bestTune
+```
+
+## Null Model: Intercept-only Model
+
+```{r}
+set.seed(randSeed)
 
 null_mod <- train(
   FUTREC ~ constant,
   data = train_yes_no,
   method = "glm",
-  trControl = fitControl,
+  trControl = fitControl_best,
   metric = "logLoss",
   family = binomial
 )
-
-
-
-
-stopCluster(cl)
-
 ```
 
 
-
+## Compare Models
 
 ```{r}
 resamps <- resamples(list(XGB = xgb_mod,
@@ -307,54 +433,59 @@ resamps <- resamples(list(XGB = xgb_mod,
                      )
 summary(resamps)
 
-dotplot(resamps, metric = "logLoss", conf.level=0.5)
+dotplot(resamps, metric = "logLoss", conf.level=0.25)
+```
+
+## Explore XGB Model
+
+```{r}
+xgb_mod$bestTune
 ```
 
 ```{r}
-gam_mod$bestTune
-```
+df_imp <- varImp(xgb_mod)$importance %>% 
+  arrange(desc(Overall))
 
-```{r}
-df_imp <- as.data.frame(
-  varimp(gam_mod$finalModel)) %>% 
-  select(variable, reduction) %>% 
-  arrange(desc(reduction))
+df_imp$variable <- rownames(df_imp)
 
-df_imp$variable <- as.character(df_imp$variable)
+df_imp <- df_imp %>% 
+  select(variable, Overall)
+
+row.names(df_imp) <- NULL
 
 knitr::kable(df_imp)
 ```
 
 ```{r}
-pdp.top1 <- partial(gam_mod,
+pdp.top1 <- partial(xgb_mod,
           pred.var = df_imp$variable[1],
           plot = TRUE,
           rug = TRUE)
 
-pdp.top2 <- partial(gam_mod,
+pdp.top2 <- partial(xgb_mod,
           pred.var = df_imp$variable[2],
           plot = TRUE,
           rug = TRUE)
 
-pdp.top3 <- partial(gam_mod,
+pdp.top3 <- partial(xgb_mod,
     pred.var = df_imp$variable[3],
     plot = TRUE,
     chull = TRUE
   )
 
-pdp.top4 <- partial(gam_mod,
+pdp.top4 <- partial(xgb_mod,
     pred.var = df_imp$variable[4],
     plot = TRUE,
     chull = TRUE
   )
 
-pdp.top5 <- partial(gam_mod,
+pdp.top5 <- partial(xgb_mod,
     pred.var = df_imp$variable[5],
     plot = TRUE,
     chull = TRUE
   )
 
-pdp.top6 <- partial(gam_mod,
+pdp.top6 <- partial(xgb_mod,
     pred.var = df_imp$variable[6],
     plot = TRUE,
     chull = TRUE
@@ -364,9 +495,7 @@ grid.arrange(pdp.top1, pdp.top2, pdp.top3,
              pdp.top4, pdp.top5, pdp.top6, ncol = 3)
 ```
 
-
-
-## Monotone Gradient Boosting (with peeking)
+## Peeking
 
 Peeking means we use the insights from the automated models to choose variables in subsequent models. This is technically cheating and causes the cross-validation errors to be artificially low. This is addressed in the test set which does not have peeking bias.
 
@@ -383,211 +512,86 @@ top1_fmla <- as.formula(paste0("FUTREC ~",
                               paste0(best_predictor,
                                      collapse=" + ")))
 
-constraints <- c(-1, 1, -1, -1, 1, -1)
-
-monotone_constraints <- paste0(top_predictors, " = ", constraints, collapse=", \n")
-
-cat(monotone_constraints)
 ```
 
 
-```{r}
-library(doParallel)
 
-cl <- makePSOCKcluster(5)
-registerDoParallel(cl)
 
-myGrid <- expand.grid(n.trees=seq(5,100,5),
-                      interaction.depth=1,
-                      shrinkage=c(0.01, 0.025, 0.05, 0.1,
-                                  0.2, 0.3, 0.4, 0.5, 0.6,
-                                  0.7, 0.8, 0.85, 0.9, 0.95,
-                                  0.99),
-                      n.minobsinnode=c(5,10,20,40,50,60,
-                                       70, 80, 90, 100))
+## Logistic Regression (with peeking)
 
-gbm_mod_mono <- train(
-  top_fmla,
-  data = train_yes_no,
-  method = "gbm",
-  trControl = fitControl,
-  metric = "logLoss",
-  tuneGrid = myGrid,
-  distribution = "bernoulli",
-  verbose=FALSE,
-  var.monotone = constraints
-  
-)
-
-stopCluster(cl)
-
-```
-
+As mentioned early, `train` and `glm` treat the reference level differently for binary outcomes. Hence, the coefficients are flipped when training a logistic regression inside `train`.
 
 ```{r}
-gbm_mod_mono$bestTune
-```
-
-```{r}
-varImp(gbm_mod_mono)
-```
-
-
-```{r}
-pdp.top1 <- partial(gbm_mod_mono,
-          pred.var = top_predictors[1],
-          plot = TRUE,
-          rug = TRUE)
-
-pdp.top2 <- partial(gbm_mod_mono,
-          pred.var =  top_predictors[2],
-          plot = TRUE,
-          rug = TRUE)
-
-pdp.top3 <- partial(gbm_mod_mono,
-    pred.var =  top_predictors[3],
-    plot = TRUE,
-    chull = TRUE
-  )
-
-pdp.top4 <- partial(gbm_mod_mono,
-    pred.var =  top_predictors[4],
-    plot = TRUE,
-    chull = TRUE
-  )
-
-pdp.top5 <- partial(gbm_mod_mono,
-    pred.var =  top_predictors[5],
-    plot = TRUE,
-    chull = TRUE
-  )
-
-pdp.top6 <- partial(gbm_mod_mono,
-    pred.var =  top_predictors[6],
-    plot = TRUE,
-    chull = TRUE
-  )
-
-
-
-grid.arrange(pdp.top1, pdp.top2, pdp.top3,
-             pdp.top4, pdp.top5, pdp.top6, ncol = 3)
-```
-
-
-## One-Variable Logistic Regression (with peeking)
-
-```{r}
-library(doParallel)
-
-cl <- makePSOCKcluster(5)
-registerDoParallel(cl)
-
 logit_mod <- train(
   top1_fmla,
-  data = train_yes_no_relevel,
+  data = train_yes_no,
   method = "glm",
-  trControl = fitControl,
+  trControl = fitControl_best,
   metric = "logLoss",
   family=binomial
 )
 
-stopCluster(cl)
-
 summary(logit_mod)
 ```
 
+
+
+
+## Compare Models
+
+CV errors for models with peeking are misleadingly low. This will be addressed with a test set.
+
 ```{r}
-resamps <- resamples(list(XGB = xgb_mod,
+mymods <- list(XGB = xgb_mod,
                           GAM = gam_mod,
                           RF = rf_mod,
                           Step = stepwise_mod,
                           Lasso = glmnet_mod,
                           MARS = earth_mod,
-                          GBM_mono = gbm_mod_mono,
                           Null = null_mod,
-                          Logit = logit_mod)
-                     )
+                          Logit = logit_mod)  ## peeking
+
+resamps <- resamples(mymods)
 summary(resamps)
 
-dotplot(resamps, metric = "logLoss", conf.level=0.5)
+dotplot(resamps, metric = "logLoss", conf.level=0.25)
 ```
 
-## Shape-Constrained GAM (with peeking)
-
-
-```{r}
-scam_mod <- scam(FUTREC ~ s(SPRD_10YCMT_FEDFUNDS_adstkHH, bs="mpd") +
-                   s(D_UNRATE, bs="mpi") +
-                   s(GS10, bs="mpd"),
-                 data=train_data, family=binomial()
-                 )
-
-summary(scam_mod)
-
-plot(scam_mod,pages=1,se=FALSE,
-     all.terms=TRUE)
-
-```
-
-
-
-## Logit with Knots (with peeking)
+## Test Set Performance
 
 ```{r}
-logit_mod_knot <- glm(FUTREC ~ SPRD_10YCMT_FEDFUNDS_adstkHH +
-                   D_UNRATE + 
-                   pmax(0,D_UNRATE - 0.25) +
-                   GS10 ,
-                   data=train_data, family=binomial)
+perf <-
+  function(lst_mods,
+           f_metric = caTools::colAUC,
+           metricname = "ROC-AUC",
+           dat=test_data,
+           response="FUTREC") {
+    lst_preds <- map(
+      .x = lst_mods,
+      .f = function(x) {
+        if (class(x)[1] != "train") {
+          predict(x, newdata = dat, type = "response")
+        } else
+          (
+            predict(x, newdata = dat, type = "prob")[, "yes"]
+            
+          )
+      }
+    )
+    
+    map_dfr(lst_preds, function(x) {
+      f_metric(x, dat[,response, drop=TRUE])
+    }) %>%
+      pivot_longer(everything(), names_to = "model", values_to = metricname) 
+  }
 
-summary(logit_mod_knot)
+perf(mymods, caTools::colAUC, "ROC-AUC") %>% 
+  arrange(desc(`ROC-AUC`)) %>%
+      knitr::kable()
 
-```
-
-
-## Effect Plot for Knots
-
-```{r}
-plot(predictorEffects(logit_mod_knot, focal.levels=1000),
-     main=NULL,
-     axes = list(
-       grid = TRUE,
-       x = list(rug = FALSE),
-       y = list(type = "link")
-     ))
-```
-
-
-## Performance Metrics
-
-```{r}
-test_preds <- predict(logit_mod, newdata=test_data, type="prob")[,"yes"]
-null_preds <- predict(null_mod, newdata=test_data, type="prob")[,"yes"]
-knot_preds <- predict(logit_mod_knot, newdata=test_data, type="response")
-scam_preds <- predict(scam_mod, newdata=test_data, type="response")
-gam_preds <- predict(gam_mod, newdata=test_data, type="prob")[,"yes"]
-gbm_mono_preds <- predict(gbm_mod_mono, newdata=test_data, type="prob")[,"yes"]
-mars_preds <- predict(earth_mod, newdata=test_data, type="prob")[,"yes"]
-  
-  
-
-
-perf <- function(lst_preds, f_metric=caTools::colAUC, metricname="ROC-AUC"){
-  map_dfr(lst_preds, function(x){
-  f_metric(x, test_data$FUTREC)
-}) %>% 
-  pivot_longer(everything(), names_to="model", values_to=metricname) %>% 
-  knitr::kable()
-}
-
-myPreds <- list(logit_reg=test_preds, null_model=null_preds,
-                knot_reg=knot_preds, scam_mod = scam_preds,
-                gam_mod=gam_preds, gbm_mono=gbm_mono_preds,
-                mars_mod=mars_preds)
-
-perf(myPreds, caTools::colAUC, "ROC-AUC")
-perf(myPreds, MLmetrics::LogLoss, "LogLoss")
+perf(mymods, MLmetrics::LogLoss, "LogLoss") %>% 
+  arrange(LogLoss) %>%
+      knitr::kable()
 ```
 
 ## Probability of Recession (Most Recent Month)
@@ -601,17 +605,6 @@ curr_data$date
 
 
 ```{r}
-
-mods <- list(
-  logistic_reg = logit_mod,
-  scam_mod = scam_mod,
-  knot_mod = logit_mod_knot,
-  baseline = null_mod,
-  gam_mod = gam_mod,
-  gbm_mod_mono = gbm_mod_mono,
-  mars_mod = earth_mod
-)
-
 score_fun <- function(mods, dat) {
   output <- map_dfc(.x = mods, .f = function(x) {
     if(class(x)[1] != "train"){
@@ -631,7 +624,7 @@ score_fun <- function(mods, dat) {
 }
 
 
-knitr::kable(score_fun(mods, curr_data))
+knitr::kable(score_fun(mymods, curr_data))
 ```
 
 
@@ -640,7 +633,8 @@ knitr::kable(score_fun(mods, curr_data))
 ## Backtesting
 
 ```{r}
-full_data_bktst <- full_data_wide_features_adstock
+full_data_bktst <- full_data_wide_features_adstock %>% 
+  filter(date >= startTestDate)
 
 bkst_fun <- function(mods, dat) {
   output <- map_dfc(.x = mods, .f = function(x) {
@@ -662,7 +656,7 @@ bkst_fun <- function(mods, dat) {
   return(output)
 }
 
-df_plot <- bkst_fun(mods, full_data_bktst)
+df_plot <- bkst_fun(mymods, full_data_bktst)
 
 actuals <- full_data_bktst %>% 
   mutate(model="actuals") %>% 
@@ -670,21 +664,23 @@ actuals <- full_data_bktst %>%
 
 df_plot_final <- bind_rows(df_plot, actuals)
 
+end_test_date <- max(test_data$date)
+
 df_plot_final <- df_plot_final %>% 
-  mutate(epoc = case_when(date <= "1995-01-01" ~ "1_Before 1995",
-                          TRUE ~ "2_After 1995")
+  mutate(epoc = case_when(date <= end_test_date ~ "1_Test_Data",
+                          TRUE ~ "2_Training_Data")
   )
 
 df_plot_logit_scam <- df_plot_final %>% 
-  filter(model %in% c('actuals', 'baseline',
-                      'logistic_reg',
-                      'scam_mod', 'gbm_mod_mono'))
+  filter(model %in% c('actuals', 'Null',
+                      'Logit', 'Step', 'Lasso',
+                      'LogitKnot'))
 
 df_plot_knots_gbm <- df_plot_final %>% 
-  filter(model %in% c('actuals', 'baseline',
-                      'knot_mod',
-                      'gam_mod',
-                      'mars_mod'))
+  filter(model %in% c('actuals', 'Null',
+                      'XGB', 'RF',
+                      'GAM',
+                      'MARS'))
 ```
 
 ```{r}
@@ -706,3 +702,6 @@ ggplot(df_plot_knots_gbm, aes(x=date, y=prob_rec, group=model,
 ```
 
 
+```{r}
+stopCluster(cl)
+```
