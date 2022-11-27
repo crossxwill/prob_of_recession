@@ -44,6 +44,7 @@ library(gtsummary)
 randSeed <- 1983
 
 startTestDate <- "1978-01-01"
+startTrainDate <- "1988-01-01"
 ```
 
 ```{r}
@@ -202,16 +203,15 @@ full_data_wide <- train_test %>%
 ## Split Train/Test
 
 ```{r}
-full_size <- nrow(full_data_wide)
-
-test_size <- floor(full_size*0.5)
-
-test_id <- seq.int(1,test_size,1)
 
 full_data_wide$constant <- 1
 
-train_data <- full_data_wide[-test_id,]
-test_data <- full_data_wide[test_id,]
+train_data <- full_data_wide %>% 
+  filter(date >= startTrainDate)
+
+test_data <- full_data_wide %>% 
+  filter(date >= startTestDate) %>% 
+  filter(date < startTrainDate)
 
 train_yes_no <- train_data %>% 
   mutate(FUTREC = case_when(FUTREC == 1 ~ "yes",
@@ -254,7 +254,7 @@ registerDoParallel(cl)
 ## Cross-Validation Framework
 
 ```{r}
-fcstHorizon <- 3
+fcstHorizon <- 1
 initWindow <- 120
 param_skip <- fcstHorizon - 1
 
@@ -318,9 +318,9 @@ gam_mod$bestTune
 ## eXtreme Gradient Boosting Trees
 
 ```{r}
-grid_xgb <- expand.grid(nrounds=seq(1, 20, 2),
+grid_xgb <- expand.grid(nrounds=c(1,5,50,250),
                         max_depth=c(1,3,5),
-                        eta=seq(0.05,1,0.1),
+                        eta=seq(0.05,1,0.05),
                         gamma=0,
                         colsample_bytree=1,
                         min_child_weight=10,

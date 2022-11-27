@@ -44,6 +44,7 @@ library(gtsummary)
 randSeed <- 1983
 
 startTestDate <- "1978-01-01"
+startTrainDate <- "1988-01-01"
 ```
 
 ```{r}
@@ -237,6 +238,7 @@ full_data_wide <- full_data_wide %>%
          -value) %>% 
   drop_na()
 
+full_data_wide$constant <- 1
 
 full_data_wide_noUSREC <- full_data_wide %>% 
   select(-USREC)
@@ -256,16 +258,13 @@ train_test <- head(full_data_wide_noUSREC, -12*21)
 ## Split Train/Test
 
 ```{r}
-full_size <- nrow(train_test)
 
-test_size <- floor(full_size*0.5)
+train_data <- train_test %>% 
+  filter(date >= startTrainDate)
 
-test_id <- seq.int(1,test_size,1)
-
-train_test$constant <- 1
-
-train_data <- train_test[-test_id,]
-test_data <- train_test[test_id,]
+test_data <- train_test %>% 
+  filter(date >= startTestDate) %>% 
+  filter(date < startTrainDate)
 
 train_yes_no <- train_data %>% 
   mutate(FUTREC = case_when(FUTREC == 1 ~ "yes",
@@ -372,9 +371,9 @@ gam_mod$bestTune
 ## eXtreme Gradient Boosting Trees
 
 ```{r}
-grid_xgb <- expand.grid(nrounds=seq(1, 20, 2),
+grid_xgb <- expand.grid(nrounds=c(1,5,50,250),
                         max_depth=c(1,3,5),
-                        eta=seq(0.05,1,0.1),
+                        eta=seq(0.05,1,0.05),
                         gamma=0,
                         colsample_bytree=1,
                         min_child_weight=10,
