@@ -54,7 +54,7 @@ full_data <- map_dfr(series_id, function(x) {
   fredr(
     series_id = x,
     observation_start = as.Date("1950-01-01"),
-    observation_end = as.Date("2022-12-01")
+    observation_end = as.Date("2023-12-01")
   )
 })
 ```
@@ -101,7 +101,7 @@ $$AdStock(x_t) = x_t + \theta AdStock(x_{t-1})$$
 
 where $$0 < \theta < 1$$.
 
-The parameters cannot be estimated easily with least squares or logistic regression. Instead, we assume a range of potential values between 0.05 and 1.
+The parameters cannot be estimated easily with least squares or logistic regression. Instead, we assume a range of potential values.
 
 ```{r}
 full_data_wide_features_adstock <- full_data_wide_features %>% 
@@ -254,7 +254,7 @@ registerDoParallel(cl)
 ## Cross-Validation Framework
 
 ```{r}
-fcstHorizon <- 3
+fcstHorizon <- 6
 initWindow <- 120
 param_skip <- fcstHorizon - 1
 
@@ -307,7 +307,8 @@ gam_mod <- train(
   trControl = fitControl_oneSE,
   metric = "logLoss",
   tuneGrid = grid_gam,
-  family = Binomial()
+  family = Binomial(),
+  dfbase =3
 )
 
 plot(gam_mod)

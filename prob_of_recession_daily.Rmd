@@ -58,7 +58,7 @@ full_data <- map_dfr(series_id, function(x) {
   fredr(
     series_id = x,
     observation_start = as.Date("1950-01-01"),
-    observation_end = as.Date("2022-12-01")
+    observation_end = as.Date("2023-12-01")
   )
 })
 
@@ -66,7 +66,7 @@ recession_dates <- map_dfr(response_id, function(x) {
   fredr(
     series_id = x,
     observation_start = as.Date("1950-01-01"),
-    observation_end = as.Date("2022-12-01")
+    observation_end = as.Date("2023-12-01")
   )
 })
 ```
@@ -307,7 +307,7 @@ registerDoParallel(cl)
 ## Cross-Validation Framework
 
 ```{r}
-fcstHorizon <- 3*21
+fcstHorizon <- 6*21
 initWindow <- 120*21
 param_skip <- fcstHorizon - 1
 
@@ -360,7 +360,9 @@ gam_mod <- train(
   trControl = fitControl_oneSE,
   metric = "logLoss",
   tuneGrid = grid_gam,
-  family = Binomial()
+  family = Binomial(),
+  dfbase =3
+
 )
 
 plot(gam_mod)
