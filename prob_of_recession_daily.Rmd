@@ -19,6 +19,7 @@ Forecast the probability of a recession in the next 126 trading days using the f
 1.  Spread between 10Y CMT and Effective Federal Funds Rate
 2.  Lags of the spread
 3.  Adstock transformations of the spread
+4.  Moving averages of the spread
 
 There are between 250 and 253 trading days in a year.
 
@@ -87,7 +88,9 @@ full_data_wide_raw <- full_data %>%
 ```{r}
 full_data_wide_features <- full_data_wide_raw %>% 
   arrange(date) %>% 
-  mutate(SPRD_10YCMT_FEDFUNDS = DGS10 - DFF
+  mutate(SPRD_10YCMT_FEDFUNDS = DGS10 - DFF,
+         D_SPRD = SPRD_10YCMT_FEDFUNDS -
+           lag(SPRD_10YCMT_FEDFUNDS, 21)
          ) %>% 
   mutate(across(
     .cols=c(SPRD_10YCMT_FEDFUNDS),
@@ -118,7 +121,7 @@ The parameters cannot be estimated easily with least squares or logistic regress
 full_data_wide_features_adstock <- full_data_wide_features %>% 
   arrange(date) %>% 
     mutate(across(
-    .cols=c(SPRD_10YCMT_FEDFUNDS),
+    .cols=c(SPRD_10YCMT_FEDFUNDS, D_SPRD),
     .fns=list(adstk001 = ~stats::filter(.x,
                                      filter=0.001,
                                      method="recursive") ,
@@ -151,7 +154,7 @@ ma_fun <- function(k_param){
 full_data_wide_features_adstock <- full_data_wide_features_adstock %>% 
   arrange(date) %>% 
     mutate(across(
-    .cols=c(SPRD_10YCMT_FEDFUNDS),
+    .cols=c(SPRD_10YCMT_FEDFUNDS, D_SPRD),
     .fns=list(ma5d = ~stats::filter(.x,
                                      filter=ma_fun(5),
                                     method="convolution",
@@ -235,8 +238,7 @@ full_data_wide$FUTREC <- df_FUTREC$FUTREC
 full_data_wide <- full_data_wide %>% 
   select(date=date.x, everything(), -date_month,
          -date_year, -date.y,
-         -value) %>% 
-  drop_na()
+         -value)
 
 full_data_wide$constant <- 1
 
@@ -251,7 +253,8 @@ Since the NBER often dates recessions after they have already occurred (and some
 ```{r}
 recent_data <- tail(full_data_wide_noUSREC, 12*21)
 
-train_test <- head(full_data_wide_noUSREC, -12*21)
+train_test <- head(full_data_wide_noUSREC, -12*21) %>% 
+  drop_na()
 ```
 
 
@@ -688,11 +691,21 @@ perf(mymods, MLmetrics::LogLoss, "LogLoss") %>%
       knitr::kable()
 ```
 
-## Probability of Recession (Most Recent Trading Day)
+## Probability of Recession (Most Recent 12 months)
 
 ```{r}
 
-curr_data <- tail(full_data_wide_features_adstock, 1)
+curr_data <- recent_data
+
+curr_data$date
+```
+
+
+## Probability of Recession (the 12 most recent months)
+
+```{r}
+
+curr_data <- recent_data
 
 curr_data$date
 ```
@@ -708,17 +721,29 @@ score_fun <- function(mods, dat) {
 
     )
     
-  }) %>%
-    pivot_longer(everything(), names_to = "model",
-                 values_to = "prob_rec")
+  })
   
-  output$prob_rec <- scales::percent(output$prob_rec)
+  output$date <- dat$date
+    
+    
+  output <- output %>% 
+    pivot_longer(-date, names_to = "model",
+                 values_to = "prob_rec")
   
   return(output)
 }
 
 
-knitr::kable(score_fun(mymods, curr_data))
+recent_prob <- score_fun(mymods, curr_data)
+
+knitr::kable(recent_prob %>% filter(
+  date >= "2022-10-01"
+))
+
+ggplot(recent_prob, aes(x=date, y=prob_rec,
+                        group=model, color=model)) +
+  geom_line() + theme_bw() +
+  theme(legend.position = "bottom")
 ```
 
 

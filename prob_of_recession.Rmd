@@ -14,13 +14,11 @@ knitr::opts_chunk$set(warning = FALSE)
 
 ## Summary
 
-Forecast the probability of a recession in the next 6 months using the following predictors:
+Forecast the probability of a recession in the next 6 months using the spread between 10Y CMT and Effective Federal Funds Rate and its transformations:
 
-1.  Spread between 10Y CMT and Effective Federal Funds Rate
-2.  YOY change in Unemployment Rate
-3.  YOY growth in CPI-U
-4.  YOY change in Effective Federal Funds Rate
-5.  Adstock transformations of predictors
+1. Lags
+2. Adstock
+3. Moving average
 
 ## Extract Historical Data
 
@@ -48,7 +46,7 @@ startTrainDate <- "1988-01-01"
 ```
 
 ```{r}
-series_id <- c("FEDFUNDS", "GS10", "USREC", "UNRATE", "CPIAUCSL")
+series_id <- c("FEDFUNDS", "GS10", "USREC")
 
 full_data <- map_dfr(series_id, function(x) {
   fredr(
@@ -75,21 +73,17 @@ full_data_wide_raw <- full_data %>%
 full_data_wide_features <- full_data_wide_raw %>% 
   arrange(date) %>% 
   mutate(SPRD_10YCMT_FEDFUNDS = GS10 - FEDFUNDS,
-         D_UNRATE = UNRATE - lag(UNRATE, 12),
-         G_CPIU = (CPIAUCSL / lag(CPIAUCSL, 12) - 1) * 100,
-         D_EFFR = FEDFUNDS - lag(FEDFUNDS, 12),
-         D_GS10 = GS10 - lag(GS10, 12)
+         D_SPRD = SPRD_10YCMT_FEDFUNDS -
+           lag(SPRD_10YCMT_FEDFUNDS, 1)
          ) %>% 
   mutate(across(
-    .cols=c(SPRD_10YCMT_FEDFUNDS, D_UNRATE,
-               G_CPIU, D_EFFR, GS10, D_GS10),
+    .cols=c(SPRD_10YCMT_FEDFUNDS, D_SPRD),
     .fns=list(lag1 = ~lag(.x, 1),
          lag3 = ~lag(.x, 3),
          lag6 = ~lag(.x, 6),
          lag9 = ~lag(.x, 9),
          lag12 = ~lag(.x, 12))
-  )) %>% 
-  select(-CPIAUCSL) %>% ## index rises with time
+  ))  %>%
   drop_na()
 ```
 
@@ -107,7 +101,7 @@ The parameters cannot be estimated easily with least squares or logistic regress
 full_data_wide_features_adstock <- full_data_wide_features %>% 
   arrange(date) %>% 
     mutate(across(
-    .cols=c(UNRATE:D_GS10),
+    .cols=c(SPRD_10YCMT_FEDFUNDS, D_SPRD),
     .fns=list(adstk85 = ~stats::filter(.x,
                                      filter=0.85,
                                      method="recursive") ,
@@ -144,7 +138,7 @@ ma_fun <- function(k_param){
 full_data_wide_features_adstock <- full_data_wide_features_adstock %>% 
   arrange(date) %>% 
     mutate(across(
-    .cols=c(SPRD_10YCMT_FEDFUNDS),
+    .cols=c(SPRD_10YCMT_FEDFUNDS, D_SPRD),
     .fns=list(
          ma2m = ~stats::filter(.x,
                                       filter=ma_fun(2),
@@ -176,7 +170,8 @@ Since the NBER often dates recessions after they have already occurred (and some
 ```{r}
 recent_data <- tail(full_data_wide_features_adstock, 12)
 
-train_test <- head(full_data_wide_features_adstock, -12)
+train_test <- head(full_data_wide_features_adstock, -12) %>% 
+  drop_na()
 ```
 
 
@@ -634,11 +629,11 @@ perf(mymods, MLmetrics::LogLoss, "LogLoss") %>%
       knitr::kable()
 ```
 
-## Probability of Recession (Most Recent Month)
+## Probability of Recession (the 12 most recent months)
 
 ```{r}
 
-curr_data <- tail(full_data_wide_features_adstock, 1)
+curr_data <- recent_data
 
 curr_data$date
 ```
@@ -654,17 +649,29 @@ score_fun <- function(mods, dat) {
 
     )
     
-  }) %>%
-    pivot_longer(everything(), names_to = "model",
-                 values_to = "prob_rec")
+  })
   
-  output$prob_rec <- scales::percent(output$prob_rec)
+  output$date <- dat$date
+    
+    
+  output <- output %>% 
+    pivot_longer(-date, names_to = "model",
+                 values_to = "prob_rec")
   
   return(output)
 }
 
 
-knitr::kable(score_fun(mymods, curr_data))
+recent_prob <- score_fun(mymods, curr_data)
+
+knitr::kable(recent_prob %>% filter(
+  date >= "2022-10-01"
+))
+
+ggplot(recent_prob, aes(x=date, y=prob_rec,
+                        group=model, color=model)) +
+  geom_line() + theme_bw() +
+  theme(legend.position = "bottom")
 ```
 
 
